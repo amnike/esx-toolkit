@@ -1,0 +1,100 @@
+{
+ "project": {
+  "name": "FR-26-48817",
+  "profile": "XMX",
+  "userID": "ADMIN",
+  "userName": "Local Admin",
+  "created": "2026-10-23T09:12:26Z",
+  "modified": "2026-10-23T09:21:21Z",
+  "status": "In_Progress",
+  "projGUID": "02a89132-55de-4dbc-b790-941c70aa4688",
+  "version": "16"
+ },
+ "contacts": [
+  {
+   "type": "ClaimRep",
+   "id": "CNT2"
+  },
+  {
+   "type": "Client",
+   "name": "Taylor & Morgan Reyes",
+   "id": "CNT1"
+  },
+  {
+   "type": "Estimator",
+   "id": "CNT3"
+  },
+  {
+   "type": "DeskAdjuster"
+  },
+  {
+   "type": "IADeskAdjuster"
+  },
+  {
+   "type": "Claimant",
+   "id": "CNT9"
+  },
+  {
+   "type": "SalesRep",
+   "id": "CNT4"
+  },
+  {
+   "type": "Claim_Handler"
+  },
+  {
+   "type": "Insurer"
+  },
+  {
+   "type": "Contractor_Rep"
+  },
+  {
+   "type": "Key_Holder"
+  }
+ ],
+ "address": {
+  "street": "2217 Birchwood Lane",
+  "street2": "",
+  "city": "Cedar Hollow",
+  "state": "OH",
+  "postal": "43099",
+  "country": "US"
+ },
+ "rooms": [
+  {
+   "id": "GRP1",
+   "code": "",
+   "type": "",
+   "desc": "",
+   "isRoom": "",
+   "items": []
+  },
+  {
+   "id": "GRP2",
+   "code": "MAIN_LEVEL",
+   "type": "Non_Room",
+   "desc": "Main Level",
+   "isRoom": "0",
+   "items": []
+  },
+  {
+   "id": "GRP3",
+   "code": "KITCHEN",
+   "type": "Living",
+   "desc": "Kitchen",
+   "isRoom": "1",
+   "items": []
+  }
+ ],
+ "sketchRooms": [
+  {
+   "id": "SKT238",
+   "name": "",
+   "dimCode": "KITCHEN",
+   "ceilingHeight": "9.0000000",
+   "ceilingType": "0",
+   "lastDims": "C=187.0711651549885;F=187.0711651549885;PC=54.94282202066513;PF=54.94282202066513;W=494.4853981859864;V=1683.6404863948962;",
+   "key": "GRP3",
+   "parentKey": "GRP2"
+  }
+ ]
+}
