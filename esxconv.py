@@ -108,6 +108,39 @@ def property_block(full):
         return {}
     return {}
 
+def money(t):
+    """A money cell's value: $1,234.56 -> 1234.56, (12.00) -> -12.0."""
+    v = t.strip().replace('$', '').replace(',', '')
+    neg = v.startswith('(')
+    return float(v.strip('()')) * (-1 if neg else 1)
+
+def column_at(cols, right):
+    """The column whose header ends where this number ends (numbers sit flush right under their
+    header), within 20 points; None when no header is that close."""
+    best = min(cols.items(), key=lambda kv: abs(kv[1] - right), default=None)
+    return best[0] if best and abs(best[1] - right) <= 20 else None
+
+HEADER_WORDS = [('UNIT PRICE', 'replace'), ('QUANTITY', 'qty'), ('UNIT', 'replace'), ('TAX', 'tax'),
+                ('O&P', 'op'), ('RCV', 'total'), ('AGE/LIFE', 'age'), ('COND.', 'cond'), ('DEP %', 'dep'),
+                ('DEPREC.', 'deprec'), ('ACV', 'acv')]
+
+def header_columns(cells, right_of):
+    """Each column's right edge from a header row. A cell holding two headers ("RCV AGE/LIFE") is
+    split by its words, each word's right edge counted from its place in the cell's text."""
+    cols = {}
+    for cx, ctxt in cells:
+        u = ctxt.strip().upper()
+        right = right_of.get((cx, ctxt), cx)
+        width = (right - cx) / max(len(u), 1)
+        taken = [False] * len(u)
+        for word, col in HEADER_WORDS:
+            for m in re.finditer(re.escape(word), u):
+                if any(taken[m.start():m.end()]):
+                    continue
+                taken[m.start():m.end()] = [True] * (m.end() - m.start())
+                cols.setdefault(col, cx + width * m.end())
+    return cols
+
 def number_after(label, full, flags=0):
     """A claim, policy or file number after its label. It has a digit, so a label next to it
     ("Policy", "Price", "Type") is never taken for one."""
@@ -162,9 +195,12 @@ def parse_pdf(path):
     hint = None
     pending = None  # AP layout: item awaiting its qty/price row
     has_totals = False
+    rcv_cols = {}  # the RCV layout's columns: the right edge of each header, kept across pages
+    ap_cols = {}  # the appraisal layout's, the same way
 
     for pno, page in enumerate(extract_pages(path)):
         rows = {}
+        right_of = {}  # (x, text) -> the cell's right edge
         for el in page:
             if not isinstance(el, LTTextContainer):
                 continue
@@ -176,6 +212,7 @@ def parse_pdf(path):
                     continue
                 y = round(line.y0)
                 rows.setdefault(y, []).append((line.x0, txt))
+                right_of[(line.x0, txt)] = line.x1
         merged = []
         for y in sorted(rows.keys(), reverse=True):
             if merged and abs(merged[-1][0] - y) <= 3:
@@ -187,8 +224,24 @@ def parse_pdf(path):
         for y, cells in merged:
             texts = {c[1].strip().upper() for c in cells}
             joined = ' '.join(sorted(texts))
+            if ('RCV' in texts and any(t.startswith('QUANTITY') and 'UNIT PRICE' in t for t in texts)
+                    and 'AGE/LIFE' not in joined and 'COND.' not in joined):
+                # one row an item: its words, then QUANTITY UNIT PRICE | TAX | O&P | RCV | DEPREC. |
+                # ACV, each number flush right under its header
+                page_layout = 'RCV'
+                rcv_cols = {}
+                for cx, ctxt in cells:
+                    u, right = ctxt.strip().upper(), right_of.get((cx, ctxt), cx)
+                    if 'UNIT PRICE' in u: rcv_cols['replace'] = right
+                    elif u == 'TAX': rcv_cols['tax'] = right
+                    elif u == 'O&P': rcv_cols['op'] = right
+                    elif u == 'RCV': rcv_cols['total'] = right
+                    elif u.startswith('DEPREC'): rcv_cols['deprec'] = right
+                    elif u == 'ACV': rcv_cols['acv'] = right
+                break
             if 'QUANTITY' in texts and ('AGE/LIFE' in joined or 'COND.' in joined):
                 page_layout = 'AP'
+                ap_cols = header_columns(cells, right_of)
                 break
             if 'QUANTITY' in texts:
                 page_layout = 'SF'
@@ -244,6 +297,30 @@ def parse_pdf(path):
                         flush_to(hint)
                     hint = r
                     continue
+            if page_layout == 'RCV':
+                first_x, first_txt = cells[0]
+                m = NUM_ITEM.match(first_txt)
+                numbered = bool(m and first_x < 120)
+                if numbered:
+                    buf.append({'num': int(m.group(1)), 'desc': m.group(2).strip(), 'qty': None, 'unit': None,
+                                'remove': None, 'reset': None, 'replace': None, 'tax': None, 'op': None, 'total': None})
+                if not buf:
+                    continue
+                item, placed = buf[-1], False
+                for cx, ctxt in (cells[1:] if numbered else cells):
+                    t = ctxt.strip()
+                    qm = QTY_RE.match(t)
+                    if qm and item['qty'] is None and 120 <= cx < 270:
+                        item['qty'], item['unit'], placed = float(qm.group(1).replace(',', '')), qm.group(2), True
+                    elif MONEY_RE.match(t) and cx >= 120:
+                        col = column_at(rcv_cols, right_of.get((cx, ctxt), cx))
+                        if col in ('replace', 'tax', 'op', 'total') and item[col] is None:
+                            item[col], placed = money(t), True
+                if (not numbered and not placed and first_x < 120 and len(cells) <= 2
+                        and not QTY_RE.match(first_txt) and not MONEY_RE.match(first_txt)
+                        and not re.search(r'DOI LIC|Yellow Claims|Page:\s*\d|Accurate as|Appraisal Exhibit', joined_txt, re.I)):
+                    item['desc'] += ' ' + first_txt.strip()  # its words, wrapped onto the next line
+                continue
             if page_layout == 'AP':
                 # Appraisal: desc row (NUM. text), then qty/unit-price/tax/op/rcv/dep/acv row
                 first_x, first_txt = cells[0]
@@ -272,10 +349,16 @@ def parse_pdf(path):
                         pending['qty'] = float(qm.group(1).replace(',', ''))
                         pending['unit'] = qm.group(2)
                     elif MONEY_RE.match(t):
-                        nums.append((cx, float(t.replace('$', '').replace(',', '').strip('()'))))
-                if nums:
-                    # AP col order: unit-price ~142, tax ~196, op ~246, rcv ~286-298, acv ~544-557
-                    for cx, v in nums:
+                        nums.append((cx, money(t), right_of.get((cx, ctxt), cx)))
+                for cx, v, right in nums:
+                    col = column_at(ap_cols, right) if ap_cols else None
+                    if col in ('replace', 'tax', 'op', 'total'):
+                        pending[col] = v
+                    elif col == 'acv':
+                        pending.setdefault('acv', v)
+                    elif col is None and not ap_cols:
+                        # no header seen: AP col order: unit-price ~142, tax ~196, op ~246,
+                        # rcv ~286-298, acv ~544-557
                         if cx < 175: pending['replace'] = v
                         elif cx < 225: pending['tax'] = v
                         elif cx < 270: pending['op'] = v

@@ -72,19 +72,21 @@ python esxconv.py --verify output.ESX    # roundtrip check
 | SF | QUANTITY / UNIT PRICE / TAX / GCO&P / RCV | State Farm customer copy |
 | SC | qty only, no prices | Scope reports |
 
-### Validated accuracy
+### Accuracy against the PDFs
 
-Every line item's total checked against its source PDF (penny-exact):
+Each converted file's line items, added up, against the line items the PDF itself prints (read
+and checked against the PDF's own room and grand totals). 11 real estimate PDFs in 4 print
+layouts, kept out of this repo:
 
-| Source PDF | Items | Total |
+| | Totals equal to the PDF's, to the cent | The others, off by |
 |---|---|---|
-| Tagvoryan Byers | 560 | $239,963.38 |
-| ARA Gutierrez | 470 | $172,875.41 |
-| ARA est 03-30-21 | 445 | $164,711.99 |
-| TAGVORYAN Carrier Appraiser | 433 | $165,209.42 |
-| Gutierrez v State Farm | 406 | $87,876.77 |
-| Rossmoyne 12-22-22 | 380 | $91,778.03 |
-| Customer Copy Final Draft | 147 | $40,623.77 |
+| Before the 2026-11-09 fixes | 4 of 11 | 0.05% to 50% (two were missing about half their dollars) |
+| After | 5 of 11 | 0.05% to 3.2% (four within 0.4%) |
+
+What's left is a few lines a file: a line read twice, a quantity missed, or a note or page-footer
+text added to a line's words. `itemcheck_all.py` checks that each line's own numbers agree with
+each other, not that a file adds up to its PDF, so check a converted file's total against the PDF
+before relying on it.
 
 ## Files
 
@@ -95,6 +97,7 @@ Every line item's total checked against its source PDF (penny-exact):
 | `template.xml` | decoded estimate skeleton used by the writer |
 | `samples/real_sample.xml` | decrypted real estimate — test fixture |
 | `samples/real_sample.json` | same estimate, parsed |
+| `samples/sample-estimate.ESX` | a fictional estimate (53 lines, $19,732.20) converted by `esxconv.py`: its total equals its PDF's |
 | `itemcheck_all.py` | total-accuracy validation harness |
 
 ## Converter fixes (2026-11-09)
@@ -118,17 +121,21 @@ leaves the field empty when the PDF doesn't have it:
 - **R&R lines:** the unit price is the remove price plus the replace price. In print layouts
   with a RESET column, the remove price is read from that column.
 - **Date entered:** the PDF's own, when it has one.
+- **Columns by their headers:** in the "QUANTITY UNIT PRICE | TAX | O&P | RCV | DEPREC. | ACV"
+  layout (not recognised before) and the appraisal layout, each number goes to the header it sits
+  flush right under. Before, a fixed position was used, so a wide depreciation number such as
+  "(162.98)" replaced the line's RCV total, and prices were read from the wrong columns.
 
 Checked on 11 real estimate PDFs (not in this repo):
 
 - none of the template's details are left in any file;
 - every file has its own project ID;
-- each file keeps the same lines and totals as before;
+- each file's lines and totals stay the same or come closer to the PDF (see "Accuracy against the PDFs");
 - `--verify` passes on every file;
 - on R&R lines, the unit prices now match the PDF.
 
-Not fixed: in print layouts with unit price, tax, O&P and RCV columns, some lines take the RCV
-column as their unit price. Those lines' totals are still right.
+Not fixed: 6 of the 11 converted files still differ from their PDF by a few lines (see "Accuracy
+against the PDFs").
 
 ## Integration notes
 
