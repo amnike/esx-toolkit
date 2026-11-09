@@ -83,28 +83,89 @@ def room_from_line(txt):
             return r
     return None
 
+CITY_RE = re.compile(r'^\s*(.+?),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?\s*$')
+
+def property_block(full):
+    """The property's street, city, state and ZIP, and its client, from the cover. pdfminer gives
+    the labels first, then the values: the client's name, the street, then "City, ST 12345". The
+    address is the first "City, ST 12345" line after the Property label, with the street on the
+    line above it and the client on the line above that. {} when the cover has no such lines."""
+    lines = full.splitlines()
+    for i, line in enumerate(lines):
+        if not re.match(r'^\s*Property\s*:', line):
+            continue
+        for j in range(i + 1, min(i + 12, len(lines))):
+            m = CITY_RE.match(lines[j])
+            if not m:
+                continue
+            above = [re.sub(r'^\s*Property\s*:\s*', '', lines[k]).strip() for k in range(j - 1, i - 1, -1)]
+            above = [a for a in above if a and not a.endswith(':')]
+            street = above[0] if above and re.search(r'\d', above[0]) else ''
+            out = {'street': street[:60], 'city': m.group(1).strip()[:30], 'state': m.group(2), 'postal': m.group(3)}
+            if street and len(above) > 1:
+                out['client'] = above[1][:80]
+            return out
+        return {}
+    return {}
+
+def money(t):
+    """A money cell's value: $1,234.56 -> 1234.56, (12.00) -> -12.0."""
+    v = t.strip().replace('$', '').replace(',', '')
+    neg = v.startswith('(')
+    return float(v.strip('()')) * (-1 if neg else 1)
+
+def column_at(cols, right):
+    """The column whose header ends where this number ends (numbers sit flush right under their
+    header), within 20 points; None when no header is that close."""
+    best = min(cols.items(), key=lambda kv: abs(kv[1] - right), default=None)
+    return best[0] if best and abs(best[1] - right) <= 20 else None
+
+HEADER_WORDS = [('UNIT PRICE', 'replace'), ('QUANTITY', 'qty'), ('UNIT', 'replace'), ('TAX', 'tax'),
+                ('O&P', 'op'), ('RCV', 'total'), ('AGE/LIFE', 'age'), ('COND.', 'cond'), ('DEP %', 'dep'),
+                ('DEPREC.', 'deprec'), ('ACV', 'acv')]
+
+def header_columns(cells, right_of):
+    """Each column's right edge from a header row. A cell holding two headers ("RCV AGE/LIFE") is
+    split by its words, each word's right edge counted from its place in the cell's text."""
+    cols = {}
+    for cx, ctxt in cells:
+        u = ctxt.strip().upper()
+        right = right_of.get((cx, ctxt), cx)
+        width = (right - cx) / max(len(u), 1)
+        taken = [False] * len(u)
+        for word, col in HEADER_WORDS:
+            for m in re.finditer(re.escape(word), u):
+                if any(taken[m.start():m.end()]):
+                    continue
+                taken[m.start():m.end()] = [True] * (m.end() - m.start())
+                cols.setdefault(col, cx + width * m.end())
+    return cols
+
+def number_after(label, full, flags=0):
+    """A claim, policy or file number after its label. It has a digit, so a label next to it
+    ("Policy", "Price", "Type") is never taken for one."""
+    m = re.search(label + r'\s*(?:Number|#|No\.?)\s*[:\s]\s*([A-Za-z0-9\-/]*\d[A-Za-z0-9\-/]*)', full, flags)
+    return m.group(1).strip() if m else None
+
 def parse_pdf(path):
     from pdfminer.high_level import extract_pages, extract_text
     from pdfminer.layout import LTTextContainer
     full = extract_text(path)
     header = {}
-    m = re.search(r'File\s*(?:Number|#|No\.?)\s*[:\s]\s*([A-Za-z0-9\-/]+)', full)
-    if m: header['file'] = m.group(1).strip()
-    m = re.search(r'Claim\s*(?:Number|#|No\.?)\s*[:\s]\s*([A-Za-z0-9\-/]+)', full, re.I)
-    if m: header['claim'] = m.group(1).strip()
-    m = re.search(r'Policy\s*(?:Number|#|No\.?)\s*[:\s]\s*([A-Za-z0-9\-/]+)', full, re.I)
-    if m: header['policy'] = m.group(1).strip()
+    for key, label, flags in (('file', 'File', 0), ('claim', 'Claim', re.I), ('policy', 'Policy', re.I)):
+        got = number_after(label, full, flags)
+        if got:
+            header[key] = got
+    header.update(property_block(full))
     m = re.search(r'Client\s*:\s*\n\s*(?!Property|Operator|Estimator)(.+)', full)
-    if m: header['client'] = m.group(1).strip()[:80]
+    if m: header.setdefault('client', m.group(1).strip()[:80])
     if not header.get('client'):
         m = re.search(r'^([A-Z][a-zA-Z]+,?\s+[A-Z][a-zA-Z]+)\s*$', '\n'.join(full.splitlines()[:15]), re.M)
         if m and not re.match(r'Property|Estimate', m.group(1)): header['client'] = m.group(1)
-    m = re.search(r'Property\s*:\s*\n\s*(.+)\n\s*(.+)', full)
-    if m: header['address'] = (m.group(1).strip() + ', ' + m.group(2).strip())[:100]
     m = re.search(r'Estimator\s*:\s*\n?\s*([A-Za-z .,-]+)', full)
     if m: header['estimator'] = m.group(1).strip()[:60]
     m = re.search(r'Type of Estimate\s*:\s*(.+)', full)
-    if m: header['type'] = m.group(1).strip()[:60]
+    if m and not m.group(1).strip().endswith(':'): header['type'] = m.group(1).strip()[:60]
     m = re.search(r'Date Entered\s*:\s*([\d/]+)', full)
     if m: header['date'] = m.group(1)
 
@@ -134,9 +195,12 @@ def parse_pdf(path):
     hint = None
     pending = None  # AP layout: item awaiting its qty/price row
     has_totals = False
+    rcv_cols = {}  # the RCV layout's columns: the right edge of each header, kept across pages
+    ap_cols = {}  # the appraisal layout's, the same way
 
     for pno, page in enumerate(extract_pages(path)):
         rows = {}
+        right_of = {}  # (x, text) -> the cell's right edge
         for el in page:
             if not isinstance(el, LTTextContainer):
                 continue
@@ -148,6 +212,7 @@ def parse_pdf(path):
                     continue
                 y = round(line.y0)
                 rows.setdefault(y, []).append((line.x0, txt))
+                right_of[(line.x0, txt)] = line.x1
         merged = []
         for y in sorted(rows.keys(), reverse=True):
             if merged and abs(merged[-1][0] - y) <= 3:
@@ -159,8 +224,24 @@ def parse_pdf(path):
         for y, cells in merged:
             texts = {c[1].strip().upper() for c in cells}
             joined = ' '.join(sorted(texts))
+            if ('RCV' in texts and any(t.startswith('QUANTITY') and 'UNIT PRICE' in t for t in texts)
+                    and 'AGE/LIFE' not in joined and 'COND.' not in joined):
+                # one row an item: its words, then QUANTITY UNIT PRICE | TAX | O&P | RCV | DEPREC. |
+                # ACV, each number flush right under its header
+                page_layout = 'RCV'
+                rcv_cols = {}
+                for cx, ctxt in cells:
+                    u, right = ctxt.strip().upper(), right_of.get((cx, ctxt), cx)
+                    if 'UNIT PRICE' in u: rcv_cols['replace'] = right
+                    elif u == 'TAX': rcv_cols['tax'] = right
+                    elif u == 'O&P': rcv_cols['op'] = right
+                    elif u == 'RCV': rcv_cols['total'] = right
+                    elif u.startswith('DEPREC'): rcv_cols['deprec'] = right
+                    elif u == 'ACV': rcv_cols['acv'] = right
+                break
             if 'QUANTITY' in texts and ('AGE/LIFE' in joined or 'COND.' in joined):
                 page_layout = 'AP'
+                ap_cols = header_columns(cells, right_of)
                 break
             if 'QUANTITY' in texts:
                 page_layout = 'SF'
@@ -185,8 +266,6 @@ def parse_pdf(path):
                         v = cells[idx + 1][1]
                         if v not in ('Property', 'Operator', 'Estimator') and not v.endswith(':'):
                             header.setdefault('client', v.strip()[:80])
-                    if base == 'Property' and idx + 1 < len(cells):
-                        header.setdefault('address', cells[idx + 1][1].strip()[:60])
                     if base == 'File Number' and idx + 1 < len(cells):
                         header.setdefault('file', cells[idx + 1][1].strip()[:30])
         for y, cells in merged:
@@ -218,6 +297,30 @@ def parse_pdf(path):
                         flush_to(hint)
                     hint = r
                     continue
+            if page_layout == 'RCV':
+                first_x, first_txt = cells[0]
+                m = NUM_ITEM.match(first_txt)
+                numbered = bool(m and first_x < 120)
+                if numbered:
+                    buf.append({'num': int(m.group(1)), 'desc': m.group(2).strip(), 'qty': None, 'unit': None,
+                                'remove': None, 'reset': None, 'replace': None, 'tax': None, 'op': None, 'total': None})
+                if not buf:
+                    continue
+                item, placed = buf[-1], False
+                for cx, ctxt in (cells[1:] if numbered else cells):
+                    t = ctxt.strip()
+                    qm = QTY_RE.match(t)
+                    if qm and item['qty'] is None and 120 <= cx < 270:
+                        item['qty'], item['unit'], placed = float(qm.group(1).replace(',', '')), qm.group(2), True
+                    elif MONEY_RE.match(t) and cx >= 120:
+                        col = column_at(rcv_cols, right_of.get((cx, ctxt), cx))
+                        if col in ('replace', 'tax', 'op', 'total') and item[col] is None:
+                            item[col], placed = money(t), True
+                if (not numbered and not placed and first_x < 120 and len(cells) <= 2
+                        and not QTY_RE.match(first_txt) and not MONEY_RE.match(first_txt)
+                        and not re.search(r'DOI LIC|Yellow Claims|Page:\s*\d|Accurate as|Appraisal Exhibit', joined_txt, re.I)):
+                    item['desc'] += ' ' + first_txt.strip()  # its words, wrapped onto the next line
+                continue
             if page_layout == 'AP':
                 # Appraisal: desc row (NUM. text), then qty/unit-price/tax/op/rcv/dep/acv row
                 first_x, first_txt = cells[0]
@@ -246,10 +349,16 @@ def parse_pdf(path):
                         pending['qty'] = float(qm.group(1).replace(',', ''))
                         pending['unit'] = qm.group(2)
                     elif MONEY_RE.match(t):
-                        nums.append((cx, float(t.replace('$', '').replace(',', '').strip('()'))))
-                if nums:
-                    # AP col order: unit-price ~142, tax ~196, op ~246, rcv ~286-298, acv ~544-557
-                    for cx, v in nums:
+                        nums.append((cx, money(t), right_of.get((cx, ctxt), cx)))
+                for cx, v, right in nums:
+                    col = column_at(ap_cols, right) if ap_cols else None
+                    if col in ('replace', 'tax', 'op', 'total'):
+                        pending[col] = v
+                    elif col == 'acv':
+                        pending.setdefault('acv', v)
+                    elif col is None and not ap_cols:
+                        # no header seen: AP col order: unit-price ~142, tax ~196, op ~246,
+                        # rcv ~286-298, acv ~544-557
                         if cx < 175: pending['replace'] = v
                         elif cx < 225: pending['tax'] = v
                         elif cx < 270: pending['op'] = v
@@ -365,6 +474,10 @@ def parse_pdf(path):
         buf.append(pending)
     if buf:
         flush_to(hint or 'UNSPECIFIED')
+    client = (header.get('client') or '').split('\n')[0].strip()
+    if client.endswith(':') or client.upper() in ('DESCRIPTION', 'QTY', 'PROPERTY', 'OPERATOR', 'ESTIMATOR'):
+        client = ''
+    header['client'] = client
     return header, [(nm, rooms[nm]) for nm in order if rooms[nm]]
 
 # ---------------- description -> code mapping ----------------
@@ -442,13 +555,23 @@ def build_items_xml(items):
             continue
         cat, sel, act = map_item(d)
         qty, unit = it.get('qty'), it.get('unit') or ''
-        up = it.get('replace') or 0.0
+        rem, rep = it.get('remove') or 0.0, it.get('replace') or 0.0
+        if re.match(r'r\s*&\s*r\b', d, re.I) and rep:
+            # an R&R line (its own words say so) is its remove price and its replace price. It has
+            # no detach & reset price, so a number read as one is its remove price (a layout with
+            # a RESET column puts it there). On any other line the remove column isn't added in.
+            rem = rem or (it.get('reset') or 0.0)
+            up = rem + rep
+        else:
+            up = rep
         if not up and it.get('reset'):
             up = it['reset']
-        if not up and it.get('remove'):
-            up = it['remove']
-        tot = it.get('total') or (round(qty * up, 2) if qty else None)
-        if tot:
+        if not up and rem:
+            up = rem
+        tot = it.get('total')  # the line's own total, 0.00 too; only a line with none is worked out
+        if tot is None and qty:
+            tot = round(qty * up, 2)
+        if tot is not None:
             total += tot
         a = ['type="I"', f'cat="{cat}"', f'sel="{sel}"']
         if act:
@@ -465,36 +588,61 @@ def build_items_xml(items):
         parts.append('<ITEM ' + ' '.join(a) + '/>')
     return parts, total
 
-def build_xactdoc(header, rooms, template_xml):
+def set_in(x, tag_re, values):
+    """Set attributes on the first tag `tag_re` matches. Returns x unchanged when there's no tag."""
+    m = re.search(tag_re, x)
+    if m is None:
+        return x
+    tag = m.group(0)
+    for attr, val in values:
+        tag = re.sub(r'(\s' + re.escape(attr) + r'=")[^"]*(")', lambda mm, v=val: mm.group(1) + v + mm.group(2), tag, count=1)
+    return x[:m.start()] + tag + x[m.end():]
+
+def iso_date(mdy, now):
+    """10/1/2026 -> 2026-10-01T00:00:00Z, as Xactimate keeps a date; `now` when it isn't one."""
+    m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', (mdy or '').strip())
+    return f'{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}T00:00:00Z' if m else now
+
+def empty_sample_sketch(x):
+    """The template's own sketch (Verisk's test kitchen: its room, walls and corners) belongs to no
+    estimate made from it: a sketch level that holds a room is left empty."""
+    def one(m):
+        return m.group(1) + '/>' if '<SKETCHROOM' in m.group(2) else m.group(0)
+    return re.sub(r'(<SKETCHLEVEL\b[^>]*?)>(.*?)</SKETCHLEVEL>', one, x, flags=re.S)
+
+def build_xactdoc(header, rooms, template_xml, now=None):
+    """The XACTDOC.XML for an estimate. The template is a real Xactimate test project (Verisk's
+    "Taylor & Morgan Reyes", claim FR-26-48817, 2217 Birchwood Lane): every one of its own details
+    is replaced with the estimate's, or left empty when the PDF doesn't give it."""
     x = template_xml
-    now = '2026-11-09T12:00:00Z'
-    def set_attr(s, name, val):
-        head_end = s.index('>')
-        if name + '="' in s[:head_end]:
-            s = re.sub(re.escape(name) + r'="[^"]*"', name + '="' + val + '"', s, count=1)
-        return s
-    pi_end = x.index('<TPI_STATUSES/>')
-    pi = x[:pi_end]
+    now = now or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    def attr_of(tag_re, attr):
+        m = re.search(tag_re, x)
+        a = re.search(r'\s' + attr + r'="([^"]*)"', m.group(0)) if m else None
+        return a.group(1) if a else ''
+    old_claim = attr_of(r'<COVERAGE_LOSS\b[^>]*>', 'claimNumber')
+    old_policy = attr_of(r'<COVERAGE_LOSS\b[^>]*>', 'policyNumber')
     name = re.sub(r'[^\w\-]+', '_', (header.get('file') or header.get('claim') or 'IMPORT'))[:28]
-    pi = set_attr(pi, 'name', name)
-    pi = set_attr(pi, 'created', now)
-    pi = set_attr(pi, 'statusChange', now)
-    pi = set_attr(pi, 'modified', now)
-    pi = set_attr(pi, 'projGUID', str(uuid.uuid5(uuid.NAMESPACE_URL, name + now)))
-    x = pi + x[pi_end:]
-    if header.get('client'):
-        x = re.sub(r'(<CONTACT type="Client" id="CNT1" name=")[^"]*(")', lambda mm: mm.group(1) + esc(header['client']) + mm.group(2), x, count=1)
-    if header.get('address'):
-        am = re.search(r'^(.+?),\s*([A-Za-z .]+),?\s+([A-Z]{2})\s+(\d{5})', header['address'])
-        if am:
-            x = re.sub(r'street="[^"]*"', 'street="' + esc(am.group(1)[:60]) + '"', x, count=1)
-            x = re.sub(r'city="[^"]*"', 'city="' + esc(am.group(2).strip()[:30]) + '"', x, count=1)
-            x = re.sub(r'state="[^"]*"', 'state="' + am.group(3) + '"', x, count=1)
-            x = re.sub(r'postal="[^"]*"', 'postal="' + am.group(4) + '"', x, count=1)
-    if header.get('claim'):
-        x = re.sub(r'claimNumber="[^"]*"', 'claimNumber="' + esc(header['claim']) + '"', x, count=1)
-    if header.get('policy'):
-        x = re.sub(r'policyNumber="[^"]*"', 'policyNumber="' + esc(header['policy']) + '"', x, count=1)
+    # its own project: a new ID, its name and times, set on PROJECT_INFO itself. Its profile is
+    # left blank: the Xactimate that opens it gives it its own default profile. The template's
+    # "XMX" (the test setup it came from) is refused by any Xactimate without that profile
+    # ("Profile unavailable"); blank and no profile both import and open normally.
+    x = set_in(x, r'<PROJECT_INFO\b[^>]*>', [('name', esc(name)), ('created', now), ('statusChange', now),
+                                            ('modified', now), ('projGUID', str(uuid.uuid4())),
+                                            ('profile', '')])
+    claim, policy = esc(header.get('claim') or ''), esc(header.get('policy') or '')
+    x = set_in(x, r'<COVERAGE_LOSS\b[^>]*>', [('claimNumber', claim), ('policyNumber', policy)])
+    for old, new in ((old_claim, claim), (old_policy, policy)):  # the template's history of them
+        if old:
+            x = x.replace(f'to="{old}"', f'to="{new}"')
+    x = set_in(x, r'<CONTACT type="Client"[^>]*>', [('name', esc(header.get('client') or ''))])
+    x = set_in(x, r'<ADDRESS type="Property"[^>]*>', [(k, esc((header.get(k) or '')[:n])) for k, n in
+                                                     (('street', 60), ('city', 30), ('state', 2), ('postal', 10))])
+    x = re.sub(r'(<PHONE\b[^>]*?\snumber=")[^"]*(")', r'\1\2', x)  # the template's phone numbers
+    x = set_in(x, r'<ADM\b[^>]*>', [('dateEntered', iso_date(header.get('date'), now))])
+    if 'fire' not in (header.get('type') or '').lower():  # its "Fire" type of loss: a fire's only
+        x = x.replace('<TOL code="FIRE" desc="Fire" group="4">', '<TOL>', 1)
+    x = empty_sample_sketch(x)
     if header.get('estimator'):
         x = x.replace('userName="Local Admin"', 'userName="' + esc(header['estimator'][:40]) + '"', 1)
     g_start = x.index('<GROUP id="GRP1">')
