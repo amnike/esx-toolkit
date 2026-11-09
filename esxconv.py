@@ -623,9 +623,13 @@ def build_xactdoc(header, rooms, template_xml, now=None):
     old_claim = attr_of(r'<COVERAGE_LOSS\b[^>]*>', 'claimNumber')
     old_policy = attr_of(r'<COVERAGE_LOSS\b[^>]*>', 'policyNumber')
     name = re.sub(r'[^\w\-]+', '_', (header.get('file') or header.get('claim') or 'IMPORT'))[:28]
-    # its own project: a new ID, its name and times, set on PROJECT_INFO itself
+    # its own project: a new ID, its name and times, set on PROJECT_INFO itself. Its profile is
+    # left blank: the Xactimate that opens it gives it its own default profile. The template's
+    # "XMX" (the test setup it came from) is refused by any Xactimate without that profile
+    # ("Profile unavailable"); blank and no profile both import and open normally.
     x = set_in(x, r'<PROJECT_INFO\b[^>]*>', [('name', esc(name)), ('created', now), ('statusChange', now),
-                                            ('modified', now), ('projGUID', str(uuid.uuid4()))])
+                                            ('modified', now), ('projGUID', str(uuid.uuid4())),
+                                            ('profile', '')])
     claim, policy = esc(header.get('claim') or ''), esc(header.get('policy') or '')
     x = set_in(x, r'<COVERAGE_LOSS\b[^>]*>', [('claimNumber', claim), ('policyNumber', policy)])
     for old, new in ((old_claim, claim), (old_policy, policy)):  # the template's history of them
