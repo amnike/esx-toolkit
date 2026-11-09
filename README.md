@@ -97,6 +97,39 @@ Every line item's total checked against its source PDF (penny-exact):
 | `samples/real_sample.json` | same estimate, parsed |
 | `itemcheck_all.py` | total-accuracy validation harness |
 
+## Converter fixes (2026-11-09)
+
+`template.xml` is a real Xactimate test project (Taylor & Morgan Reyes, claim FR-26-48817, 2217
+Birchwood Lane). `esxconv.py` now replaces every one of its details in each file it makes, or
+leaves the field empty when the PDF doesn't have it:
+
+- **Project:** each file gets its own project ID, name and times. `set_attr` looked in the XML
+  declaration, so every file kept the template's.
+- **Address:** read from the cover: the first "City, ST 12345" line after Property, and the street
+  above it. Before, a failed match left 2217 Birchwood Lane in every file.
+- **Claim and policy numbers:** a number must contain a digit, so a label beside it ("Policy",
+  "Price", "Type") is never taken for one. The template's FR-26-48817 and HO3-5521908 are never
+  left in, including in its history entries.
+- **Client:** from the cover, or empty. The template's phone number is cleared too.
+- **Type of loss:** "Fire" only for a fire.
+- **Sketch:** the template's own kitchen sketch is left out. It was keyed to group GRP3, which is
+  whatever room a file writes third.
+- **Line totals:** a 0.00 total stays 0.00. It used to be worked out again from the line's price.
+- **R&R lines:** the unit price is the remove price plus the replace price. In print layouts
+  with a RESET column, the remove price is read from that column.
+- **Date entered:** the PDF's own, when it has one.
+
+Checked on 11 real estimate PDFs (not in this repo):
+
+- none of the template's details are left in any file;
+- every file has its own project ID;
+- each file keeps the same lines and totals as before;
+- `--verify` passes on every file;
+- on R&R lines, the unit prices now match the PDF.
+
+Not fixed: in print layouts with unit price, tax, O&P and RCV columns, some lines take the RCV
+column as their unit price. Those lines' totals are still right.
+
 ## Integration notes
 
 Built as a drop-in reader for an import pipeline that routes files by content sniffing: `open_esx()` accepts path or bytes, raises `ValueError` with a reason on anything it can't parse. Already-plain variants (zip with XACTDOC.XML directly inside) pass through untouched.
